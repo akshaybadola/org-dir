@@ -24,6 +24,9 @@
 ;; GNU Emacs; see the file COPYING.  If not, write to the Free Software
 ;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 
+;; The code should be considered pre-alpha as a package but the functions are
+;; usable
+
 (require 'cl)
 (require 'org)
 (require 'seq)
@@ -176,8 +179,8 @@
 ;; TODO: Incorportate function below, preferably via translation table
 (defun org-directory--sanitize-filename (str)
   (if (string-match-p "\\[\\|\\]" x)
-      (replace-regexp-in-string "\\[\\|\\]" "" x)
-    x))
+      (replace-regexp-in-string "\\[\\|\\]" "" (sanitize-filename-exp(x)))
+    (sanitize-filename-exp(x))))
 
 (defun sanitize-filename-exp (str)
   (let* ((str (replace-in-string str "í" "i"))
