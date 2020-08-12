@@ -1,4 +1,4 @@
-;; org-directory.el --- Import and synchronize files from the the filesystem to org mode. ;;; -*- lexical-binding: t; -*-
+;;; org-directory.el --- Import and synchronize files from the the filesystem to org mode. ;;; -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2019
 ;; Akshay Badola
@@ -7,6 +7,8 @@
 ;; Maintainer:	Akshay Badola <akshay.badola.cs@gmail.com>
 ;; Time-stamp:	<Mon Nov 18 02:03:01 IST 2019>
 ;; Keywords:	files, filesystem, org
+;; Version:     0.1
+;; Package-Requires: ((org "9.1.9") (f "0.20.0") (bind-key "2.4"))
 
 ;; This file is *NOT* part of GNU Emacs.
 
@@ -27,9 +29,16 @@
 ;; The code should be considered pre-alpha as a package but the functions are
 ;; usable
 
+
+;;; Commentary:
+;; None
+
+;;; Code:
+
 (require 'cl)
 (require 'org)
 (require 'seq)
+(require 'subr-x)
 
 ;; CHECK: May create confusion with bibkey they should match later
 (defvar nonascii-conversion-alist '(("í" . "i")
@@ -113,7 +122,7 @@
   "From text corresponding to an org heading, fetch first `file`
   link"
   (save-restriction
-    (org-narrow-to-subtree)             ; THIS: is where it has to be fixed 
+    (org-narrow-to-subtree)             ; THIS: is where it has to be fixed
     (car (org-element-map (org-element-parse-buffer) 'link
            (lambda (link)
              (when (string-match-p "^file" (org-element-property :type link)) link))))))
@@ -152,7 +161,9 @@
          (bounds (delq nil (org-directory--get-bounds parse (+ level 1))))
          (paths-bounds (mapcar
                         (lambda (x)
-                          (cons (org-directory--get-first-path-from-bounds (get-buffer buf) (car x) (cadr x)) x))
+                          (cons (org-directory--get-first-path-from-bounds
+                                 (get-buffer buf) (car x) (cadr x))
+                                x))
                         bounds)))
     paths-bounds))
 
@@ -163,15 +174,16 @@
   (interactive)
   (save-excursion
     (let* ((path (org-element-property :path (org-directory--get-first-path-from-text)))
-           (files (f-files path))
+           (files-in-path (f-files path))
            (existing-paths-bounds (org-directory--get-paths-bounds (current-buffer)))
-           (meh (mapcar 'car existing-paths-bounds))
-           (additional-files (set-difference files meh :test 'string-equal))
-           (deleted-files (set-difference meh files :test 'string-equal)))
+           (existing-files (mapcar 'car existing-paths-bounds))
+           (additional-files (set-difference files-in-path existing-files :test 'string-equal))
+           (deleted-files (set-difference existing-files files-in-path :test 'string-equal)))
       ;; TODO: Here it assumes the regions which will be deleted are sorted
       ;;       Have to add a check for that.
       ;; TODO: Notes if any should be stored in some other file when the
       ;;       entry is deleted
+      (message (format "%s" existing-paths-bounds))
       (when deleted-files
         (seq-do (lambda (x)
                   (let ((start (cadr (assoc x existing-paths-bounds)))
@@ -202,35 +214,65 @@
                 (cdr additional-files))
         (delete-blank-lines)))))
 
-(defun org-directory-insert-dirs-from-path ()
-  "imports all the directories from a path"
-  (interactive)
-  (let ((path (expand-file-name (read-directory-name "Directory:"))))
+(defun org-directory--edit-heading-helper ()
+  (let* ((heading (org-get-heading t t t t))
+         (splits (split-string heading "/"))
+         (split-length (length splits)))
+    (when (> split-length 1)
+      (org-edit-headline (car (last splits)))
+      (loop for x from 1 to (- split-length 1)
+            do (org-demote)))))
+
+;; FIXME: This doesn't check for existing paths like the function for files
+;; TODO: For large directories, find may be faster. See `ref-man--files-non-hidden'
+(defun org-directory-insert-dirs-from-path (recurse)
+  "Imports all the non-hidden directories from a path to the
+current org buffer. Recurses directories, with a universal prefix
+argument `\\[universal-argument]'"
+  (interactive (list (if (equal current-prefix-arg '(4)) t nil)))
+  (let ((path (expand-file-name (ido-read-directory-name "Directory: "))))
     (save-excursion
-      (let ((dirs (f-directories path)))
+      (let ((dirs (f-directories path
+                                 (lambda (x)
+                                   (not (string-match-p "/\\." x)))
+                                 recurse)))
         (when dirs
           (org-insert-heading)
           (insert (f-base path) "\n")
           (org-indent-line)
           (insert "[[" path "]]" "\n")
           (org-insert-subheading nil)
-          (insert (replace-regexp-in-string path "" (car dirs)) "\n")
+          (insert (string-remove-prefix "/"
+                                        (replace-regexp-in-string path "" (car dirs))) "\n")
           (org-indent-line)
           (insert "[[" (car dirs) "]]" "\n")
           (seq-do (lambda (x)
                     (org-insert-heading nil)
-                    (insert (replace-regexp-in-string path "" x) "\n")
+                    (insert (string-remove-prefix "/" (replace-regexp-in-string path "" x)) "\n")
                     (org-indent-line)
                     (insert "[[" x "]]" "\n"))
-                  (cdr dirs)))))))
+                  (cdr dirs))
+          ;; Now fix hierarchy demotions
+          (outline-up-heading 1)
+          (loop until (not (org-at-heading-p))
+                do
+                (outline-next-heading)
+                (org-directory--edit-heading-helper)))))))
 
+(defun org-directory-dirs-non-hidden (path)
+  (f-entries path (lambda (x)
+                    (and (f-directory-p x)
+                         (not (string-match-p "/\\." x))))
+             t))
+
+;; FIXME: This doesn't check for existing paths like the function for files
 ;; FIXME: Don't insert if the subdirs are already inserted
 ;;        1. Narrow to subtree
 ;;        2. parse all headings
 ;;        3. if subdir not in headings, insert subdir
 ;;        4. Else recursively update (optional)
-(defun org-directory-insert-subdirs-from-heading ()
-  "inserts all the subdirectories in the path"
+(defun org-directory-insert-subdirs-from-heading (&optional recurse)
+  "Inserts all the subdirectories in the path. Does not recurse for now"
   (interactive)
   (save-excursion
     (let* ((path (org-element-property :path (org-directory--get-first-path-from-text)))
@@ -238,12 +280,12 @@
       (when dirs
         (org-insert-heading-respect-content)
         (org-demote)
-        (insert (replace-regexp-in-string path "" (car dirs)) "\n")
+        (insert (string-remove-prefix "/" (replace-regexp-in-string path "" (car dirs))) "\n")
         (org-indent-line)
         (insert "[[" (car dirs) "]]" "\n")
         (seq-do (lambda (x)
                   (org-insert-heading nil)
-                  (insert (replace-regexp-in-string path "" x) "\n")
+                  (insert (string-remove-prefix "/" (replace-regexp-in-string path "" x)) "\n")
                   (org-indent-line)
                   (insert "[[" x "]]" "\n"))
                 (cdr dirs))))))
@@ -251,7 +293,9 @@
 ;; TODO: Incorportate function below, use `nonascii-conversion-alist'
 (defun org-directory--sanitize-filename (str)
   (if (string-match-p "\\[\\|\\]" x)
-      (replace-regexp-in-string "\\[\\|\\]" "" (sanitize-filename-exp(x)))
+      (replace-regexp-in-string "\\[\\|\\]" "" (sanitize-filename-exp (x)))
     (sanitize-filename-exp(x))))
 
 (provide 'org-directory)
+
+;;; org-directory.el ends here
