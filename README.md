@@ -1,4 +1,4 @@
-# org-directory
+# org-dir
 
 _Very Early but **working** functions_.
 _It's not a proper module yet._

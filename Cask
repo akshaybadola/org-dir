@@ -2,7 +2,7 @@
 (source melpa)
 (source org)
 
-(package-file "org-directory.el")
+(package-file "org-dir.el")
 
 (development
  (depends-on "f")
