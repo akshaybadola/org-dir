@@ -1,6 +1,6 @@
 ;;; org-dir.el --- Import and synchronize files from the the filesystem to org mode. ;;; -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2019
+;; Copyright (C) 2019,2020
 ;; Akshay Badola
 
 ;; Author:	Akshay Badola <akshay.badola.cs@gmail.com>
@@ -35,6 +35,8 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dash)
+(require 'f)
 (require 'org)
 (require 'org-element)
 (require 'seq)
@@ -180,6 +182,48 @@
 ;;   "Exclude files matching `org-dir-exclude-regexp'"
 ;;   (string-match-p org-dir-exclude-regexp))
 
+(defun org-dir--unique-name (fname)
+  (let* ((i 1)
+         (temp (org-dir--uniqname-helper fname i)))
+    (while (f-exists? temp)
+      (setq i (1+ i))
+      (setq temp (org-dir--uniqname-helper fname i)))
+    temp))
+
+(defun org-dir--uniqname-helper (fname int)
+  "Rename helper for adding filename FNAME with suffix INT before extension."
+  (format "%s-%s%s%s" (f-no-ext fname) int
+          (or (and (or (f-ext fname) (string-suffix-p "." fname)) ".") "")
+          (or (f-ext fname) "")))
+
+(defun org-dir--same-files (filea fileb)
+  "Check if md5sum of FILEA and FILEB is same."
+  (string= (car (split-string (shell-command-to-string (format "md5sum \"%s\"" filea))))
+           (car (split-string (shell-command-to-string (format "md5sum \"%s\"" fileb))))))
+
+(defun org-dir--check-filename (fname)
+  "Check FNAME for square brackets.
+Renames the files if one with square bracket is found and asks
+user to confirm if the target file exists."
+  ;; TODO: Files are renamed if they contain "[]" but if the
+  ;;       target file already exists it's skipped, but not
+  ;;       deleted. Add an option to delete the file also
+  ;;       especially if md5sum matches.
+  ;;       Have to use Use system md5sum with shell-command-to-string
+  (if (string-match-p "\\[\\|\\]" fname)
+      (if (file-exists-p (replace-regexp-in-string "\\[\\|\\]" "" fname))
+          (let ((new-name (f-filename (replace-regexp-in-string "\\[\\|\\]" "" fname))))
+            (if (y-or-n-p (format "File %s for %s already exists. Overwrite? "
+                                  (f-filename new-name)
+                                  (f-filename fname)))
+                ;; TODO: Add option to generate unique name also
+                (progn (rename-file fname new-name t) (cons new-name (list :status t)))
+              (cons fname (list :fname new-name :status nil
+                                :same (org-dir--same-files fname (f-join (f-dirname fname) new-name))))))
+        (rename-file fname (replace-regexp-in-string "\\[\\|\\]" "" fname))
+        (cons (replace-regexp-in-string "\\[\\|\\]" "" fname) (list :status t)))
+    (cons fname (list :status t))))
+
 ;; DONE: Don't insert file(s) if already inserted
 ;; TODO: Check for FULL file-name-sanity before deletion from buffer
 (defun org-dir-insert-files-from-heading ()
@@ -194,12 +238,15 @@
            (additional-files (-remove (lambda (x)
                                         (string-match-p org-dir-exclude-regexp x))
                                       additional-files))
-           (deleted-files (cl-set-difference existing-files files-in-path :test 'string-equal)))
+           (deleted-files (cl-set-difference existing-files files-in-path :test 'string-equal))
+           skipped-files)
       ;; TODO: Here it assumes the regions which will be deleted are sorted
       ;;       Have to add a check for that.
       ;; TODO: Notes if any should be stored in some other file when the
       ;;       entry is deleted
-      (message (format "%s" existing-paths-bounds))
+      ;;
+      ;; NOTE: This was only for debug
+      ;; (message (format "%s" existing-paths-bounds))
       (when deleted-files
         (seq-do (lambda (x)
                   (let ((start (cadr (assoc x existing-paths-bounds)))
@@ -216,19 +263,24 @@
           (forward-line -1))
         (end-of-line) (newline)
         (indent-relative)
-        (insert "- " "[[" (replace-regexp-in-string "\\[\\|\\]" "" (car additional-files)) "]["
-                (replace-regexp-in-string "\\[\\|\\]" "" (file-name-nondirectory (car additional-files)))
-                "]]" "\n")
+        (let* ((fname-status (org-dir--check-filename (car additional-files)))
+               (fname (car fname-status)))
+          (if (plist-get (cdr fname-status) :status)
+              (insert "- " "[[" fname "][" (f-filename fname) "]]" "\n")
+            (push fname-status skipped-files)))
         (seq-do (lambda (x)
-                  (indent-relative)
-                  (when (string-match-p "\\[\\|\\]" x)
-                    (rename-file x (replace-regexp-in-string "\\[\\|\\]" "" x)))
-                  (insert "- " "[[" (replace-regexp-in-string "\\[\\|\\]" "" x) "]["
-                          (file-name-nondirectory
-                           (replace-regexp-in-string "\\[\\|\\]" "" x))
-                          "]]" "\n"))
-                (cdr additional-files))
-        (delete-blank-lines)))))
+                  (indent-relative t)
+                  (let* ((fname-status (org-dir--check-filename x))
+                         (fname (car fname-status)))
+                    (if (plist-get (cdr fname-status) :status)
+                        (insert "- " "[[" fname "][" (f-filename fname) "]]" "\n")
+                      (push fname-status skipped-files))))
+                (cdr additional-files)))
+      (delete-blank-lines)
+      (when skipped-files
+        (message (concat "Skipped files:\n\t"
+                         (mapconcat (lambda (x) (f-filename (car x))) skipped-files "\n\t")))
+        skipped-files))))
 
 (defun org-dir--demote-heading-helper ()
   "Demote the current heading according to depth from current path."
